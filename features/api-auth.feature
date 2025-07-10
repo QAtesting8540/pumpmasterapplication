@@ -48,3 +48,4 @@ Feature: API Authentication and Security
     When I call the logout endpoint
     Then the token should be invalidated
     And subsequent requests with the token should fail
+    
