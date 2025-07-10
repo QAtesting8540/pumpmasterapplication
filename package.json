@@ -1,0 +1,55 @@
+{
+  "name": "pump-master-automation",
+  "version": "1.0.0",
+  "description": "Playwright TypeScript automation framework for Pump Master application",
+  "main": "index.js",
+  "scripts": {
+    "start": "echo 'Mock server for testing' && npx http-server -p 3000 -c-1",
+    "test": "npx playwright test",
+    "test:web": "npx playwright test --grep @web",
+    "test:mobile": "npx playwright test --grep @mobile",
+    "test:api": "npx playwright test --grep @api",
+    "test:chrome": "npx playwright test --project=chromium",
+    "test:firefox": "npx playwright test --project=firefox",
+    "test:webkit": "npx playwright test --project=webkit",
+    "test:headed": "npx playwright test --headed",
+    "test:debug": "npx playwright test --debug",
+    "test:report": "npx playwright show-report",
+    "test:ui": "npx playwright test --ui",
+    "allure:generate": "allure generate allure-results --clean",
+    "allure:open": "allure open allure-report",
+    "install:browsers": "npx playwright install",
+    "install:deps": "npx playwright install-deps",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
+    "format": "prettier --write ."
+  },
+  "keywords": [
+    "playwright",
+    "typescript",
+    "automation",
+    "testing",
+    "bdd",
+    "pom",
+    "mobile",
+    "api"
+  ],
+  "author": "QA Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@types/node": "^20.8.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "allure-commandline": "^2.24.0",
+    "allure-playwright": "^2.15.0",
+    "eslint": "^8.50.0",
+    "http-server": "^14.1.1",
+    "prettier": "^3.0.3",
+    "typescript": "^5.2.0"
+  },
+  "dependencies": {
+    "axios": "^1.5.0",
+    "dotenv": "^16.3.0"
+  }
+}

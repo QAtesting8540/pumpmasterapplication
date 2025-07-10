@@ -1,0 +1,399 @@
+name: Pump Master Automation Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'tests/**'
+      - 'pages/**'
+      - 'utils/**'
+      - 'features/**'
+      - 'playwright.config.ts'
+      - 'package.json'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'tests/**'
+      - 'pages/**'
+      - 'utils/**'
+      - 'features/**'
+      - 'playwright.config.ts'
+      - 'package.json'
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of tests to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - web
+          - mobile
+          - api
+      browser:
+        description: 'Browser to test (for web tests)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - chromium
+          - firefox
+          - webkit
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      test-matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Lint code
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Set test matrix
+        id: set-matrix
+        run: |
+          if [[ "${{ github.event.inputs.test_type }}" == "web" ]]; then
+            if [[ "${{ github.event.inputs.browser }}" == "all" ]]; then
+              echo "matrix={\"include\":[{\"project\":\"chromium\",\"type\":\"web\"},{\"project\":\"firefox\",\"type\":\"web\"},{\"project\":\"webkit\",\"type\":\"web\"}]}" >> $GITHUB_OUTPUT
+            else
+              echo "matrix={\"include\":[{\"project\":\"${{ github.event.inputs.browser }}\",\"type\":\"web\"}]}" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "${{ github.event.inputs.test_type }}" == "mobile" ]]; then
+            echo "matrix={\"include\":[{\"project\":\"Mobile Chrome\",\"type\":\"mobile\"},{\"project\":\"Mobile Safari\",\"type\":\"mobile\"}]}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.test_type }}" == "api" ]]; then
+            echo "matrix={\"include\":[{\"project\":\"api-tests\",\"type\":\"api\"}]}" >> $GITHUB_OUTPUT
+          else
+            echo "matrix={\"include\":[{\"project\":\"chromium\",\"type\":\"web\"},{\"project\":\"firefox\",\"type\":\"web\"},{\"project\":\"webkit\",\"type\":\"web\"},{\"project\":\"Mobile Chrome\",\"type\":\"mobile\"},{\"project\":\"Mobile Safari\",\"type\":\"mobile\"},{\"project\":\"api-tests\",\"type\":\"api\"}]}" >> $GITHUB_OUTPUT
+          fi
+
+  test:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.test-matrix) }}
+
+    name: Test ${{ matrix.project }} (${{ matrix.type }})
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Create directories
+        run: |
+          mkdir -p test-results
+          mkdir -p screenshots
+          mkdir -p allure-results
+
+      - name: Run tests
+        env:
+          BASE_URL: ${{ secrets.BASE_URL || 'http://localhost:3000' }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL || 'http://localhost:3000/api' }}
+          TEST_USERNAME: ${{ secrets.TEST_USERNAME || 'testuser@pumpmaster.com' }}
+          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD || 'Test@123' }}
+          CI: true
+          HEADLESS: true
+        run: |
+          if [[ "${{ matrix.type }}" == "api" ]]; then
+            npx playwright test --project="${{ matrix.project }}" --grep="@api" --reporter=html,allure-playwright,junit
+          elif [[ "${{ matrix.type }}" == "mobile" ]]; then
+            npx playwright test --project="${{ matrix.project }}" --grep="@mobile" --reporter=html,allure-playwright,junit
+          else
+            npx playwright test --project="${{ matrix.project }}" --grep="@web" --reporter=html,allure-playwright,junit
+          fi
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.project }}-${{ github.run_number }}
+          path: |
+            test-results/
+            playwright-report/
+            allure-results/
+          retention-days: 30
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: screenshots-${{ matrix.project }}-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 30
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: success() || failure()
+        with:
+          name: Test Results (${{ matrix.project }})
+          path: '**/junit-results.xml'
+          reporter: java-junit
+
+  report:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Merge test results
+        run: |
+          mkdir -p merged-results/allure-results
+          find artifacts/ -name "allure-results" -exec cp -r {}/* merged-results/allure-results/ \;
+
+      - name: Generate Allure report
+        run: |
+          npm install -g allure-commandline
+          allure generate merged-results/allure-results --clean -o allure-report
+
+      - name: Deploy Allure report to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./allure-report
+          destination_dir: test-reports/${{ github.run_number }}
+
+      - name: Upload merged report
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report-${{ github.run_number }}
+          path: allure-report/
+          retention-days: 90
+
+      - name: Create test summary
+        run: |
+          echo "# Test Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.test.result }}" == "success" ]]; then
+            echo "✅ **All tests passed successfully!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Some tests failed. Please check the detailed reports.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Test Reports" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure Report](https://your-username.github.io/pump-master-automation/test-reports/${{ github.run_number }})" >> $GITHUB_STEP_SUMMARY
+          echo "- [Detailed Results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+
+  notify:
+    needs: [test, report]
+    runs-on: ubuntu-latest
+    if: always() && (github.ref == 'refs/heads/main' || github.event_name == 'schedule')
+
+    steps:
+      - name: Send Slack notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [[ "${{ needs.test.result }}" == "success" ]]; then
+            COLOR="good"
+            EMOJI=":white_check_mark:"
+            STATUS="Passed"
+          else
+            COLOR="danger"
+            EMOJI=":x:"
+            STATUS="Failed"
+          fi
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{
+              \"attachments\": [
+                {
+                  \"color\": \"$COLOR\",
+                  \"title\": \"$EMOJI Pump Master Tests $STATUS\",
+                  \"fields\": [
+                    {
+                      \"title\": \"Repository\",
+                      \"value\": \"${{ github.repository }}\",
+                      \"short\": true
+                    },
+                    {
+                      \"title\": \"Branch\",
+                      \"value\": \"${{ github.ref_name }}\",
+                      \"short\": true
+                    },
+                    {
+                      \"title\": \"Commit\",
+                      \"value\": \"${{ github.sha }}\",
+                      \"short\": true
+                    },
+                    {
+                      \"title\": \"Build\",
+                      \"value\": \"${{ github.run_number }}\",
+                      \"short\": true
+                    }
+                  ],
+                  \"actions\": [
+                    {
+                      \"type\": \"button\",
+                      \"text\": \"View Results\",
+                      \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                    },
+                    {
+                      \"type\": \"button\",
+                      \"text\": \"Allure Report\",
+                      \"url\": \"https://your-username.github.io/pump-master-automation/test-reports/${{ github.run_number }}\"
+                    }
+                  ]
+                }
+              ]
+            }" \
+            $SLACK_WEBHOOK_URL
+
+      - name: Send Teams notification
+        if: env.TEAMS_WEBHOOK_URL != ''
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          if [[ "${{ needs.test.result }}" == "success" ]]; then
+            COLOR="Good"
+            TITLE="✅ Pump Master Tests Passed"
+          else
+            COLOR="Attention"
+            TITLE="❌ Pump Master Tests Failed"
+          fi
+
+          curl -H "Content-Type: application/json" -d "{
+            \"@type\": \"MessageCard\",
+            \"@context\": \"http://schema.org/extensions\",
+            \"themeColor\": \"$COLOR\",
+            \"summary\": \"$TITLE\",
+            \"sections\": [{
+              \"activityTitle\": \"$TITLE\",
+              \"activitySubtitle\": \"Build ${{ github.run_number }}\",
+              \"facts\": [
+                {\"name\": \"Repository\", \"value\": \"${{ github.repository }}\"},
+                {\"name\": \"Branch\", \"value\": \"${{ github.ref_name }}\"},
+                {\"name\": \"Commit\", \"value\": \"${{ github.sha }}\"},
+                {\"name\": \"Trigger\", \"value\": \"${{ github.event_name }}\"}
+              ]
+            }],
+            \"potentialAction\": [
+              {
+                \"@type\": \"OpenUri\",
+                \"name\": \"View Results\",
+                \"targets\": [{\"os\": \"default\", \"uri\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}]
+              },
+              {
+                \"@type\": \"OpenUri\",
+                \"name\": \"Allure Report\",
+                \"targets\": [{\"os\": \"default\", \"uri\": \"https://your-username.github.io/pump-master-automation/test-reports/${{ github.run_number }}\"}]
+              }
+            ]
+          }" $TEAMS_WEBHOOK_URL
+
+  security-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  performance-baseline:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run performance tests
+        env:
+          BASE_URL: ${{ secrets.BASE_URL || 'http://localhost:3000' }}
+        run: |
+          npx playwright test --grep="@performance" --reporter=html
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results-${{ github.run_number }}
+          path: playwright-report/
+          retention-days: 90

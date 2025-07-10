@@ -1,0 +1,318 @@
+# Azure DevOps Pipeline for Pump Master Automation Tests
+# This pipeline runs Playwright TypeScript tests across multiple browsers and devices
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+  paths:
+    include:
+      - tests/**
+      - pages/**
+      - utils/**
+      - features/**
+      - playwright.config.ts
+      - package.json
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - tests/**
+      - pages/**
+      - utils/**
+      - features/**
+      - playwright.config.ts
+      - package.json
+
+variables:
+  - group: pump-master-test-variables # Variable group containing test credentials and URLs
+  - name: NODE_VERSION
+    value: '18.x'
+  - name: PLAYWRIGHT_BROWSERS_PATH
+    value: '$(Pipeline.Workspace)/.cache/ms-playwright'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: BuildAndTest
+    displayName: 'Build and Test'
+    jobs:
+      - job: InstallDependencies
+        displayName: 'Install Dependencies'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '$(NODE_VERSION)'
+            displayName: 'Install Node.js'
+
+          - task: Cache@2
+            inputs:
+              key: 'npm | "$(Agent.OS)" | package-lock.json'
+              restoreKeys: |
+                npm | "$(Agent.OS)"
+              path: ~/.npm
+            displayName: 'Cache npm'
+
+          - script: |
+              npm ci
+            displayName: 'Install npm dependencies'
+
+          - task: Cache@2
+            inputs:
+              key: 'playwright | "$(Agent.OS)" | package-lock.json'
+              restoreKeys: |
+                playwright | "$(Agent.OS)"
+              path: '$(PLAYWRIGHT_BROWSERS_PATH)'
+            displayName: 'Cache Playwright browsers'
+
+          - script: |
+              npx playwright install --with-deps
+            displayName: 'Install Playwright browsers'
+
+          - script: |
+              npm run lint
+            displayName: 'Run ESLint'
+            continueOnError: true
+
+      - job: WebTestsChrome
+        displayName: 'Web Tests - Chrome'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'chromium'
+              testType: 'web'
+              displayName: 'Chrome Web Tests'
+
+      - job: WebTestsFirefox
+        displayName: 'Web Tests - Firefox'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'firefox'
+              testType: 'web'
+              displayName: 'Firefox Web Tests'
+
+      - job: WebTestsWebKit
+        displayName: 'Web Tests - WebKit'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'webkit'
+              testType: 'web'
+              displayName: 'WebKit Web Tests'
+
+      - job: WebTestsEdge
+        displayName: 'Web Tests - Edge'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'edge'
+              testType: 'web'
+              displayName: 'Edge Web Tests'
+
+      - job: MobileTests
+        displayName: 'Mobile Tests'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'Mobile Chrome'
+              testType: 'mobile'
+              displayName: 'Mobile Chrome Tests'
+
+          - template: test-template.yml
+            parameters:
+              project: 'Mobile Safari'
+              testType: 'mobile'
+              displayName: 'Mobile Safari Tests'
+
+      - job: TabletTests
+        displayName: 'Tablet Tests'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'iPad'
+              testType: 'tablet'
+              displayName: 'iPad Tests'
+
+      - job: APITests
+        displayName: 'API Tests'
+        dependsOn: InstallDependencies
+        steps:
+          - template: test-template.yml
+            parameters:
+              project: 'api-tests'
+              testType: 'api'
+              displayName: 'API Tests'
+
+      - job: GenerateReports
+        displayName: 'Generate Test Reports'
+        dependsOn:
+          - WebTestsChrome
+          - WebTestsFirefox
+          - WebTestsWebKit
+          - WebTestsEdge
+          - MobileTests
+          - TabletTests
+          - APITests
+        condition: always()
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '$(NODE_VERSION)'
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm ci
+            displayName: 'Install npm dependencies'
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              buildType: 'current'
+              targetPath: '$(Pipeline.Workspace)/test-results'
+            displayName: 'Download test results'
+
+          - script: |
+              npx allure generate allure-results --clean -o allure-report
+            displayName: 'Generate Allure Report'
+            continueOnError: true
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/test-results.xml'
+              failTaskOnFailedTests: false
+              testRunTitle: 'Pump Master Automation Tests'
+            displayName: 'Publish Test Results'
+
+          - task: PublishHtmlReport@1
+            inputs:
+              reportDir: 'playwright-report'
+              tabName: 'Playwright Report'
+            displayName: 'Publish Playwright HTML Report'
+
+          - task: PublishHtmlReport@1
+            inputs:
+              reportDir: 'allure-report'
+              tabName: 'Allure Report'
+            displayName: 'Publish Allure Report'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'test-results'
+              artifact: 'test-results-$(Build.BuildId)'
+              publishLocation: 'pipeline'
+            displayName: 'Publish Test Results Artifact'
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'screenshots'
+              artifact: 'screenshots-$(Build.BuildId)'
+              publishLocation: 'pipeline'
+            condition: failed()
+            displayName: 'Publish Screenshots on Failure'
+
+  - stage: NotifyResults
+    displayName: 'Notify Results'
+    dependsOn: BuildAndTest
+    condition: always()
+    jobs:
+      - job: SendNotification
+        displayName: 'Send Test Results Notification'
+        steps:
+          - task: PowerShell@2
+            inputs:
+              targetType: 'inline'
+              script: |
+                $buildResult = "$(Agent.JobStatus)"
+                $buildUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+                $webhookUrl = "$(TEAMS_WEBHOOK_URL)"  # Set this in variable group
+
+                if ($buildResult -eq "Succeeded") {
+                  $color = "good"
+                  $title = "✅ Pump Master Tests Passed"
+                } else {
+                  $color = "danger"
+                  $title = "❌ Pump Master Tests Failed"
+                }
+
+                $payload = @{
+                  "@type" = "MessageCard"
+                  "@context" = "http://schema.org/extensions"
+                  "themeColor" = $color
+                  "summary" = $title
+                  "sections" = @(
+                    @{
+                      "activityTitle" = $title
+                      "activitySubtitle" = "Build $(Build.BuildNumber)"
+                      "facts" = @(
+                        @{
+                          "name" = "Repository"
+                          "value" = "$(Build.Repository.Name)"
+                        },
+                        @{
+                          "name" = "Branch"
+                          "value" = "$(Build.SourceBranchName)"
+                        },
+                        @{
+                          "name" = "Commit"
+                          "value" = "$(Build.SourceVersion)"
+                        }
+                      )
+                    }
+                  )
+                  "potentialAction" = @(
+                    @{
+                      "@type" = "OpenUri"
+                      "name" = "View Build Results"
+                      "targets" = @(
+                        @{
+                          "os" = "default"
+                          "uri" = $buildUrl
+                        }
+                      )
+                    }
+                  )
+                } | ConvertTo-Json -Depth 10
+
+                if ($webhookUrl) {
+                  Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $payload -ContentType 'application/json'
+                }
+            displayName: 'Send Teams Notification'
+            condition: always()
+
+  - stage: Deploy
+    displayName: 'Deploy Test Reports'
+    dependsOn: BuildAndTest
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployReports
+        displayName: 'Deploy Test Reports to Storage'
+        environment: 'test-reports'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureFileCopy@4
+                  inputs:
+                    SourcePath: '$(Pipeline.Workspace)/test-results'
+                    azureSubscription: '$(AZURE_SUBSCRIPTION)'
+                    Destination: 'AzureBlob'
+                    storage: '$(STORAGE_ACCOUNT_NAME)'
+                    ContainerName: 'test-reports'
+                    BlobPrefix: '$(Build.BuildNumber)/'
+                  displayName: 'Upload Test Reports to Azure Storage'
